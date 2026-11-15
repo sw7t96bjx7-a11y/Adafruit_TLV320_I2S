@@ -102,7 +102,7 @@
   0x40 ///< Short circuit detected at HPR / right class-D driver
 #define TLV320DAC3100_IRQ_BUTTON_PRESS 0x20 ///< Headset button pressed
 #define TLV320DAC3100_IRQ_HEADSET_DETECT                                       \
-  0x10 ///< Headset insertion detected (1) or removal detected (0)
+  0x10 ///< Headset event (sticky register) or insertion status (live register)
 #define TLV320DAC3100_IRQ_LEFT_DRC                                             \
   0x08 ///< Left DAC signal power greater than DRC threshold
 #define TLV320DAC3100_IRQ_RIGHT_DRC                                            \
@@ -225,7 +225,7 @@ public:
                            bool powerDownOnSCD = false);
   /*!
    * @brief Check if headphone outputs have detected a short circuit
-   * @return true if short circuit detected, false if not
+   * @return true if short circuit detected, false if not or on an I2C error
    */
   bool isHeadphoneShorted(void);
   bool enableSpeaker(bool en);

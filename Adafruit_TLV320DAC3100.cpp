@@ -22,6 +22,7 @@
  */
 
 #include "Adafruit_TLV320DAC3100.h"
+#include <math.h>
 
 /*!
  *    @brief  Instantiates a new TLV320DAC3100 class
@@ -1263,10 +1264,13 @@ bool Adafruit_TLV320DAC3100::getDACVolumeControl(
  * @brief Set DAC channel volume in dB
  *
  * @param right_channel true for right channel, false for left channel
- * @param dB Volume in dB (-63.5 to +24 dB)
+ * @param dB Finite volume in dB (clamped to -63.5 to +24 dB)
  * @return true: success false: failure or invalid input
  */
 bool Adafruit_TLV320DAC3100::setChannelVolume(bool right_channel, float dB) {
+  if (!isfinite(dB)) {
+    return false;
+  }
   if (!setPage(0)) {
     return false;
   }
@@ -1277,13 +1281,8 @@ bool Adafruit_TLV320DAC3100::setChannelVolume(bool right_channel, float dB) {
   if (dB < -63.5)
     dB = -63.5;
 
-  int8_t reg_val;
-  reg_val = dB * 2;
-
-  // Check for reserved values
-  if ((reg_val == 0x80) || (reg_val > 0x30)) {
-    return false;
-  }
+  // Clamping guarantees -127..48, excluding the reserved -128 value.
+  const int8_t reg_val = static_cast<int8_t>(dB * 2);
 
   Adafruit_BusIO_Register vol_ctrl = Adafruit_BusIO_Register(
       i2c_dev,
@@ -1596,6 +1595,25 @@ bool Adafruit_TLV320DAC3100::resetHeadphoneOnSCD(bool reset) {
       Adafruit_BusIO_RegisterBits(&err_ctl, 1, 0);
 
   return hp_reset.write(!reset); // Register is inverse of parameter
+}
+
+/*!
+ * @brief Check if a headphone output has detected a short circuit
+ *
+ * @return true if a short is detected, false if not or on an I2C error
+ */
+bool Adafruit_TLV320DAC3100::isHeadphoneShorted(void) {
+  if (!setPage(1)) {
+    return false;
+  }
+
+  // Page 1 / register 31, D0 is the live headphone short-circuit flag.
+  Adafruit_BusIO_Register hp_ctrl(i2c_dev, TLV320DAC3100_REG_HP_DRIVERS);
+  uint8_t value = 0;
+  if (!hp_ctrl.read(&value)) {
+    return false;
+  }
+  return (value & 0x01) != 0;
 }
 
 /*!
@@ -2107,7 +2125,6 @@ bool Adafruit_TLV320DAC3100::configureHeadphoneDriver(bool left_powered,
   Adafruit_BusIO_RegisterBits scd_mode =
       Adafruit_BusIO_RegisterBits(&hp_ctrl, 1, 1);
 
-  uint8_t reg_val = 0x04; // bit 2 must be 1
   if (!left_power.write(left_powered))
     return false;
   if (!right_power.write(right_powered))
@@ -2121,56 +2138,76 @@ bool Adafruit_TLV320DAC3100::configureHeadphoneDriver(bool left_powered,
  * @brief Calculate and set PLL values for desired frequency
  *
  * @param mclk_freq MCLK input frequency in Hz
- * @param desired_freq Desired PLL output frequency in Hz
- * @param max_error Maximum allowed error (default 0.001 = 0.1%)
- * @return true: success false: failure or invalid frequency
+ * @param desired_freq Desired PLL output frequency in Hz (80-110 MHz)
+ * @param max_error Maximum relative error (default 0.001 = 0.1%). Must be
+ * finite and nonnegative; zero requires an exact frequency.
+ * @return true: success false: invalid input, no valid configuration within
+ * the requested tolerance, or I2C failure
  */
 bool Adafruit_TLV320DAC3100::configurePLL(uint32_t mclk_freq,
                                           uint32_t desired_freq,
                                           float max_error) {
-  float ratio = (float)desired_freq / mclk_freq;
-  float best_error = 1.0; // 100% error to start
+  if (mclk_freq == 0 || desired_freq < 80000000 || desired_freq > 110000000 ||
+      !isfinite(max_error) || max_error < 0.0f) {
+    return false;
+  }
+
+  double best_error = max_error;
+  bool found = false;
   uint8_t best_P = 1, best_R = 1, best_J = 0;
   uint16_t best_D = 0;
 
-  // Try different P & R values
+  // TI equation: PLL_CLK = PLL_CLKIN * (J + D/10000) * R / P.
   for (uint8_t P = 1; P <= 8; P++) {
     for (uint8_t R = 1; R <= 16; R++) {
-      float J_float = ratio * P * R;
-      if (J_float > 63)
-        continue;
+      const double multiplier =
+          (static_cast<double>(desired_freq) * P) / (mclk_freq * double(R));
 
-      uint8_t J = (uint8_t)J_float;
-      uint16_t D = (uint16_t)((J_float - J) * 2048);
-      if (D > 2047)
-        continue;
+      // Try integer mode too: fractional mode requires R=1 and a higher input.
+      for (uint8_t fractional = 0; fractional < 2; fractional++) {
+        if (fractional && R != 1) {
+          continue;
+        }
+        const double scale = fractional ? 10000.0 : 1.0;
+        // Check both neighbors: the closest one can exceed a hardware limit.
+        for (uint8_t round_up = 0; round_up < 2; round_up++) {
+          double rounded = floor(multiplier * scale) + round_up;
+          const double upper = fractional ? 639999.0 : 63.0;
+          if (rounded < scale) {
+            rounded = scale;
+          } else if (rounded > upper) {
+            rounded = upper;
+          }
+          const uint32_t value = static_cast<uint32_t>(rounded);
+          const uint8_t J = fractional ? value / 10000 : value;
+          const uint16_t D = fractional ? value % 10000 : 0;
+          if (!validatePLLConfig(P, R, J, D, mclk_freq)) {
+            continue;
+          }
 
-      // Calculate actual frequency ratio this would give
-      float actual_ratio = (float)(J + (float)D / 2048.0) / (P * R);
-      float error = fabs(actual_ratio - ratio) / ratio;
-
-      // If this is better than our best so far, save it
-      if (error < best_error) {
-        best_error = error;
-        best_P = P;
-        best_R = R;
-        best_J = J;
-        best_D = D;
-
-        // If we're within acceptable error, use these values
-        if (error <= max_error) {
-          return setPLLValues(P, R, J, D);
+          // Compare integer frequency numerators so exact matches stay exact.
+          const uint64_t actual =
+              static_cast<uint64_t>(mclk_freq) * (10000UL * J + D) * R;
+          const uint64_t desired =
+              static_cast<uint64_t>(desired_freq) * 10000 * P;
+          const uint64_t difference =
+              actual > desired ? actual - desired : desired - actual;
+          const double error = static_cast<double>(difference) / desired;
+          if (error <= max_error && (!found || error < best_error)) {
+            found = true;
+            best_error = error;
+            best_P = P;
+            best_R = R;
+            best_J = J;
+            best_D = D;
+          }
         }
       }
     }
   }
 
-  // If we got here, use the best values we found
-  if (best_error < 0.1) { // Accept up to 10% error rather than totally fail
-    return setPLLValues(best_P, best_R, best_J, best_D);
-  }
-
-  return false; // No acceptable values found
+  // Never write an invalid candidate or silently relax the requested tolerance.
+  return found && setPLLValues(best_P, best_R, best_J, best_D);
 }
 
 /*!
@@ -2179,15 +2216,20 @@ bool Adafruit_TLV320DAC3100::configurePLL(uint32_t mclk_freq,
  * @param P PLL divider (1-8)
  * @param R PLL multiplier (1-16)
  * @param J PLL multiplier (1-63)
- * @param D PLL fractional multiplier (0-2047)
+ * @param D PLL fractional multiplier in ten-thousandths (0-9999)
  * @param pll_clkin Input clock frequency in Hz
  * @return true if configuration is valid, false if not
  */
 bool Adafruit_TLV320DAC3100::validatePLLConfig(uint8_t P, uint8_t R, uint8_t J,
                                                uint16_t D, float pll_clkin) {
-  float pll_in_div_p = pll_clkin / P;
-  float jd = J + (float)D / 2048.0;
-  float pll_out = (pll_clkin * jd * R) / P;
+  if (P < 1 || P > 8 || R < 1 || R > 16 || J < 1 || J > 63 || D > 9999 ||
+      !isfinite(pll_clkin) || pll_clkin <= 0.0f) {
+    return false;
+  }
+
+  const double pll_in_div_p = static_cast<double>(pll_clkin) / P;
+  const double jd = J + D / 10000.0;
+  const double pll_out = (pll_clkin * jd * R) / P;
 
   if (D == 0) {
     // Check D=0 constraints
@@ -2201,7 +2243,7 @@ bool Adafruit_TLV320DAC3100::validatePLLConfig(uint8_t P, uint8_t R, uint8_t J,
       return false; // R*J out of range (4-259)
     }
   } else {
-    // Check D?0 constraints
+    // Check fractional-mode constraints (D != 0).
     if (pll_in_div_p < 10000000 || pll_in_div_p > 20000000) {
       return false; // PLL_CLKIN/P out of range (10-20MHz)
     }
@@ -2209,7 +2251,7 @@ bool Adafruit_TLV320DAC3100::validatePLLConfig(uint8_t P, uint8_t R, uint8_t J,
       return false; // PLL output out of range (80-110MHz)
     }
     if (R != 1) {
-      return false; // R must be 1 when D?0
+      return false; // R must be 1 when D != 0
     }
   }
   return true;
@@ -2291,17 +2333,17 @@ bool Adafruit_TLV320DAC3100::isBeeping(void) {
 /*!
  * @brief Configure beep generator for a specific frequency and duration
  *
- * @param frequency Desired frequency in Hz (must be < sample_rate/4)
+ * @param frequency Finite positive frequency in Hz (must be < sample_rate/4)
  * @param duration_ms Length of beep in milliseconds
- * @param sample_rate Sample rate in Hz (default 48000)
- * @return true: success, false: frequency too high for sample rate or write
- * failed
+ * @param sample_rate Nonzero sample rate in Hz (default 48000)
+ * @return true: success, false: invalid frequency/sample rate or write failed
  */
 bool Adafruit_TLV320DAC3100::configureBeepTone(float frequency,
                                                uint32_t duration_ms,
                                                uint32_t sample_rate) {
-  // Check frequency limit (Fs/4)
-  if (frequency >= (sample_rate / 4.0f)) {
+  // Validate before dividing or converting floating-point coefficients.
+  if (!isfinite(frequency) || frequency <= 0.0f || sample_rate == 0 ||
+      frequency >= (sample_rate / 4.0f)) {
     return false;
   }
 
@@ -2310,11 +2352,12 @@ bool Adafruit_TLV320DAC3100::configureBeepTone(float frequency,
   uint16_t sin_val = round(sin(angle) * 32767.0f);
   uint16_t cos_val = round(cos(angle) * 32767.0f);
 
-  // Convert ms to samples
-  uint32_t length = (duration_ms * sample_rate) / 1000;
+  // Widen before multiplying: 32 bits overflow after ~89 s at 48 kHz.
+  uint64_t length = (static_cast<uint64_t>(duration_ms) * sample_rate) / 1000;
   if (length > 0x00FFFFFF) {
     length = 0x00FFFFFF;
   }
 
-  return (setBeepSinCos(sin_val, cos_val) && setBeepLength(length));
+  return (setBeepSinCos(sin_val, cos_val) &&
+          setBeepLength(static_cast<uint32_t>(length)));
 }

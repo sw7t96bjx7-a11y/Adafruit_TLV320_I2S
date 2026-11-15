@@ -1,32 +1,136 @@
 name: Arduino Library CI
 
-on: [pull_request, push, repository_dispatch]
+on:
+  pull_request:
+  push:
+    branches-ignore:
+      - gh-pages
+  repository_dispatch:
+  workflow_dispatch:
+    inputs:
+      publish_docs:
+        description: Publish documentation branch (default branch only)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-
+  native-tests:
+    name: Native driver regression tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-    - uses: actions/setup-python@v4
-      with:
-        python-version: '3.x'
-    - uses: actions/checkout@v3
-    - uses: actions/checkout@v3
-      with:
-         repository: adafruit/ci-arduino
-         path: ci
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: python3 tests/run_tests.py
 
-    - name: pre-install
-      run: bash ci/actions_install.sh
+  compile:
+    name: Compile ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [uno, leonardo, mega2560, zero, qtpy_m0, esp8266, esp32, metro_m4, trinket_m0, esp32s3]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install verified Arduino CLI
+        run: bash scripts/install-arduino-cli.sh "${RUNNER_TEMP}/arduino-cli-bin"
+      - name: Compile example and API regression sketch
+        run: python3 scripts/build.py --target "${{ matrix.target }}"
+      - name: Preserve build evidence and compile-only binaries
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: compile-only-${{ matrix.target }}-${{ github.sha }}
+          path: build-ci/${{ matrix.target }}/
+          if-no-files-found: warn
+          retention-days: 14
 
-    - name: test platforms
-      run: python3 ci/build_platform.py main_platforms
+  formatting:
+    name: C++ formatting
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Install formatter
+        run: python3 -m pip install clang-format==18.1.8
+      - name: Check library formatting
+        run: clang-format --dry-run --Werror --style=LLVM Adafruit_TLV320DAC3100.cpp Adafruit_TLV320DAC3100.h Adafruit_TLV320DAC3100_typedefs.h
 
-    - name: clang
-      run: python3 ci/run-clang-format.py -e "ci/*" -e "bin/*" -r .
+  documentation:
+    name: API documentation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Doxygen
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes doxygen
+      - run: bash scripts/build-docs.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: api-documentation-${{ github.sha }}
+          path: docs-build/
+          retention-days: 14
 
-    - name: doxygen
-      env:
-        GH_REPO_TOKEN: ${{ secrets.GH_REPO_TOKEN }}
-        PRETTYNAME : "Adafruit TLV320 I2S Arduino Library"
-      run: bash ci/doxy_gen_and_deploy.sh
+  publish-docs:
+    name: Publish documentation branch
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.publish_docs &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs: [native-tests, compile, formatting, documentation]
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Doxygen
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes doxygen
+      - run: bash scripts/build-docs.sh
+      - name: Check out documentation branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: gh-pages
+          path: pages
+      - name: Commit generated API documentation
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          mkdir -p pages/html
+          rsync -a --delete docs-build/html/ pages/html/
+          touch pages/.nojekyll
+          git -C pages config user.name 'github-actions[bot]'
+          git -C pages config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C pages add -- html .nojekyll
+          if git -C pages diff --cached --quiet; then
+            echo 'Documentation is already up to date.'
+            exit 0
+          fi
+          git -C pages commit -m "Update API documentation from ${SOURCE_SHA}"
+          git -C pages push origin HEAD:gh-pages

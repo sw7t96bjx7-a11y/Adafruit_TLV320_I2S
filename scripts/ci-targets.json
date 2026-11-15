@@ -1,0 +1,48 @@
+{
+  "arduino_cli": {
+    "version": "1.6.0",
+    "linux_x86_64_url": "https://github.com/arduino/arduino-cli/releases/download/v1.6.0/arduino-cli_1.6.0_Linux_64bit.tar.gz",
+    "linux_x86_64_sha256": "321ee249f44c78053234fec0f36101092bc6021bf24939e15e0cc2449c5ed250",
+    "source": "https://github.com/arduino/arduino-cli/releases/tag/v1.6.0"
+  },
+  "libraries": ["Adafruit BusIO@1.17.4"],
+  "library_source": "https://github.com/adafruit/Adafruit_BusIO/releases/tag/1.17.4",
+  "sketches": ["examples/basicI2Sconfig", "tests/api_link"],
+  "cores": {
+    "arduino:avr": {
+      "version": "1.8.8", "urls": [],
+      "source": "https://github.com/arduino/ArduinoCore-avr/releases/tag/1.8.8"
+    },
+    "arduino:samd": {
+      "version": "1.8.14", "urls": [],
+      "source": "https://github.com/arduino/ArduinoCore-samd/releases/tag/1.8.14"
+    },
+    "adafruit:samd": {
+      "version": "1.7.17",
+      "urls": ["https://adafruit.github.io/arduino-board-index/package_adafruit_index.json"],
+      "source": "https://github.com/adafruit/ArduinoCore-samd/releases/tag/1.7.17"
+    },
+    "esp8266:esp8266": {
+      "version": "3.1.2",
+      "urls": ["https://arduino.esp8266.com/stable/package_esp8266com_index.json"],
+      "source": "https://github.com/esp8266/Arduino/releases/tag/3.1.2"
+    },
+    "esp32:esp32": {
+      "version": "3.3.12",
+      "urls": ["https://espressif.github.io/arduino-esp32/package_esp32_index.json"],
+      "source": "https://github.com/espressif/arduino-esp32/releases/tag/3.3.12"
+    }
+  },
+  "targets": {
+    "uno": "arduino:avr:uno",
+    "leonardo": "arduino:avr:leonardo",
+    "mega2560": "arduino:avr:mega:cpu=atmega2560",
+    "zero": "arduino:samd:arduino_zero_native",
+    "qtpy_m0": "adafruit:samd:adafruit_qtpy_m0",
+    "esp8266": "esp8266:esp8266:huzzah:eesz=4M3M,xtal=80",
+    "esp32": "esp32:esp32:featheresp32:FlashFreq=80",
+    "metro_m4": "adafruit:samd:adafruit_metro_m4:speed=120",
+    "trinket_m0": "adafruit:samd:adafruit_trinket_m0",
+    "esp32s3": "esp32:esp32:esp32s3"
+  }
+}

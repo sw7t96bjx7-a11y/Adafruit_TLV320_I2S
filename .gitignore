@@ -1,0 +1,7 @@
+# Local compile and documentation outputs.
+build-ci/
+docs-build/
+examples/**/build/
+tests/**/build/
+__pycache__/
+*.pyc

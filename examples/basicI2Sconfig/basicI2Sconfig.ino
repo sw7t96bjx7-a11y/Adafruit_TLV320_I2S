@@ -35,7 +35,7 @@ void setup() {
     halt("Failed to configure codec clocks!");
   }
 
-  if (!codec.setPLLValues(1, 2, 32, 0)) { // P=2, R=2, J=32, D=0
+  if (!codec.setPLLValues(1, 2, 32, 0)) { // P=1, R=2, J=32, D=0
     halt("Failed to configure PLL values!");
   }
 
@@ -143,9 +143,9 @@ void loop() {
     }
 
     if (flags & TLV320DAC3100_IRQ_HEADSET_DETECT) {
-      Serial.println(F("- Headset insertion detected"));
-    } else if (flags & 0x10) { // Check bit but with different meaning
-      Serial.println(F("- Headset removal detected"));
+      // The sticky bit reports either event; getHeadsetStatus() above gives
+      // the current state. It cannot distinguish insertion from removal.
+      Serial.println(F("- Headset insertion or removal detected"));
     }
 
     if (flags & TLV320DAC3100_IRQ_LEFT_DRC) {
